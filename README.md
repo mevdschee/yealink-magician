@@ -1,8 +1,8 @@
 # yealink-magician
 
-Push a config onto a Yealink desk phone (T46S firmware family 66.x) without its
-admin credentials, by riding the multicast PnP handshake the phone does on boot
-after a factory reset.
+Push a config onto a Yealink desk phone (T4X series) without having its admin
+credentials, by riding the multicast PnP handshake the phone does on boot after
+a factory reset.
 
 ## How it works
 
@@ -35,27 +35,28 @@ Details:
 - **`-ip`** is also the IP filter — SUBSCRIBES and HTTP fetches from any other
   address on the segment are ignored, so two phones resetting at once won't
   cross-talk. If the phone's DHCP lease flips during the reset, the SUBSCRIBE
-  arrives from an unexpected address and you'll see `ignoring SUBSCRIBE from
+  arrives from an unexpected address and you'll see
+  `ignoring SUBSCRIBE from
   … (want …)`; re-run with the new IP.
 - **`-cfg`** bytes are served verbatim at `/y000000000000.cfg`. The one
   exception is when `-firmware` is set, in which case a `static.firmware.url`
   line is appended pointing at the magician's own HTTP server.
 - **`-firmware`** makes the run two-phase: serve the cfg, then wait for the
   phone to fetch `/firmware.rom` (full Range support, since the phone pulls in
-  chunks), then linger an extra 30s for trailing range requests before
-  exiting. The phone validates the rom's internal model/version header, so
-  the on-disk filename is irrelevant. If the rom's version equals what's
-  already flashed, the phone silently no-ops the reflash.
+  chunks), then linger an extra 30s for trailing range requests before exiting.
+  The phone validates the rom's internal model/version header, so the on-disk
+  filename is irrelevant. If the rom's version equals what's already flashed,
+  the phone silently no-ops the reflash.
 - **`-interface`** is auto-detected from the route to `-ip`. Override only if
-  you have multiple NICs on the same L2 segment and the wrong one is winning
-  the route lookup. Whatever interface is chosen is also where the PnP
-  multicast group (`224.0.1.75`) is joined.
+  you have multiple NICs on the same L2 segment and the wrong one is winning the
+  route lookup. Whatever interface is chosen is also where the PnP multicast
+  group (`224.0.1.75`) is joined.
 - **`-http-port`** is where the cfg and firmware are served. Must be reachable
   from the phone (TCP inbound on the host firewall). The default `25565` is
   arbitrary — pick anything free.
-- **`-timeout`** covers the entire run: waiting for the SUBSCRIBE, the cfg
-  GET, and (if applicable) the firmware GET. Bump it for slow firmware pulls
-  over constrained links.
+- **`-timeout`** covers the entire run: waiting for the SUBSCRIBE, the cfg GET,
+  and (if applicable) the firmware GET. Bump it for slow firmware pulls over
+  constrained links.
 
 What happens, in order:
 
@@ -71,11 +72,6 @@ What happens, in order:
    stays up an extra 30s in case the phone is still pulling ranges.
 7. Exits. The phone applies the cfg, reflashes if firmware was supplied, and
    reboots.
-
-The phone validates the firmware blob's internal model/version header, so the
-rom filename on disk doesn't have to match anything specific — the magician
-serves it at a fixed `/firmware.rom` path regardless. If the rom's version
-equals what's already flashed, the phone silently no-ops the reflash.
 
 ### Verified flow (cfg only)
 
