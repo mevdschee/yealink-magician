@@ -21,14 +21,41 @@ go run ./cmd/magician -ip <phone-ip> -cfg <path-to-cfg> [-firmware <path-to-rom>
 
 Flags:
 
-| Flag         | Default    | Notes                                                                                                                                                                                               |
-| ------------ | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-ip`        | (required) | Phone's current IPv4 address. Used as a filter — SUBSCRIBES from other devices on the segment are ignored.                                                                                          |
-| `-cfg`       | (required) | Path to the `.cfg` file to push. Bytes are served verbatim, except a `static.firmware.url` line is appended when `-firmware` is set.                                                                |
-| `-firmware`  | (optional) | Path to a `.rom` firmware to push. When set, the magician injects `static.firmware.url` into the cfg pointing at its own HTTP server, and waits for the phone to fetch the firmware before exiting. |
-| `-interface` | auto       | Network interface to bind. Auto-detected from the route to `-ip`.                                                                                                                                   |
-| `-http-port` | `25565`    | Port for the embedded HTTP server.                                                                                                                                                                  |
-| `-timeout`   | `10m`      | Total time to wait for the SUBSCRIBE + cfg fetch + firmware fetch.                                                                                                                                  |
+| Flag         | Default    | Notes                              |
+| ------------ | ---------- | ---------------------------------- |
+| `-ip`        | (required) | Phone's IPv4 address.              |
+| `-cfg`       | (required) | Path to the `.cfg` to push.        |
+| `-firmware`  | (optional) | Path to a `.rom` firmware to push. |
+| `-interface` | auto       | Network interface to bind.         |
+| `-http-port` | `25565`    | Embedded HTTP server port.         |
+| `-timeout`   | `10m`      | Total wait for the full handshake. |
+
+Details:
+
+- **`-ip`** is also the IP filter — SUBSCRIBES and HTTP fetches from any other
+  address on the segment are ignored, so two phones resetting at once won't
+  cross-talk. If the phone's DHCP lease flips during the reset, the SUBSCRIBE
+  arrives from an unexpected address and you'll see `ignoring SUBSCRIBE from
+  … (want …)`; re-run with the new IP.
+- **`-cfg`** bytes are served verbatim at `/y000000000000.cfg`. The one
+  exception is when `-firmware` is set, in which case a `static.firmware.url`
+  line is appended pointing at the magician's own HTTP server.
+- **`-firmware`** makes the run two-phase: serve the cfg, then wait for the
+  phone to fetch `/firmware.rom` (full Range support, since the phone pulls in
+  chunks), then linger an extra 30s for trailing range requests before
+  exiting. The phone validates the rom's internal model/version header, so
+  the on-disk filename is irrelevant. If the rom's version equals what's
+  already flashed, the phone silently no-ops the reflash.
+- **`-interface`** is auto-detected from the route to `-ip`. Override only if
+  you have multiple NICs on the same L2 segment and the wrong one is winning
+  the route lookup. Whatever interface is chosen is also where the PnP
+  multicast group (`224.0.1.75`) is joined.
+- **`-http-port`** is where the cfg and firmware are served. Must be reachable
+  from the phone (TCP inbound on the host firewall). The default `25565` is
+  arbitrary — pick anything free.
+- **`-timeout`** covers the entire run: waiting for the SUBSCRIBE, the cfg
+  GET, and (if applicable) the firmware GET. Bump it for slow firmware pulls
+  over constrained links.
 
 What happens, in order:
 
