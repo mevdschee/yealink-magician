@@ -4,6 +4,8 @@ Push a config onto a Yealink desk phone (T4X series) without having its admin
 credentials, by riding the multicast PnP handshake the phone does on boot after
 a factory reset.
 
+Tested on T46S and T43U.
+
 ## How it works
 
 A fresh-from-factory Yealink, on boot, multicasts a SIP `SUBSCRIBE` for the
