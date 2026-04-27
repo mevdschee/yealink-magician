@@ -13,7 +13,8 @@ A fresh-from-factory Yealink, on boot, multicasts a SIP `SUBSCRIBE` for the
 replies with a `NOTIFY` carrying a provisioning URL will be obeyed — no
 credentials required. (RFC 6080 / draft-ietf-sipping-config-framework.)
 
-The magician is the orchestrator around that handshake.
+The magician is the orchestrator around that handshake. For more details read
+[SECURITY.md](SECURITY.md).
 
 ## Usage
 
