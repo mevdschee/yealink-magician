@@ -122,10 +122,13 @@ done — phone will apply config and reboot
   during the reset, the SUBSCRIBE will arrive from an unexpected address and the
   magician will log "ignoring SUBSCRIBE from … (want …)" rather than responding.
   Re-run with the new IP.
-- **First boot after reset only.** PnP fires once per boot when
-  `static.auto_provision.pnp_enable = 1`. If the cfg you push sets
-  `pnp_enable = 0`, this is a one-shot tool — there is no PnP path back into
-  that phone afterwards.
+- **PnP must be enabled and run before RPS.** PnP fires once per boot when
+  `static.auto_provision.pnp_enable = 1` and the default
+  `static.auto_provision.boot_discovery.order` puts PnP ahead of RPS. Both are
+  factory defaults, but a sticky config from a prior owner can have changed
+  either, in which case this tool can't reach the phone. The same applies in
+  reverse: if the cfg you push sets `pnp_enable = 0` (or reorders discovery),
+  this becomes a one-shot — no PnP path back in afterwards.
 
 ## Layout
 
