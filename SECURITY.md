@@ -162,7 +162,7 @@ revision you actually have before relying on this.
    change the discovery-sequence behaviour, which is in firmware. A reset phone
    on a LAN with a PnP responder goes through the same PnP-wins flow at the next
    boot. The flip side is symmetric: a reset phone on a LAN with a _different_
-   PnP responder follows that flow too — see "Trade-offs and hardening" below.
+   PnP responder follows that flow too.
 5. **It can be made sticky.** Once your PnP responder hands the phone a URL,
    your DMS delivers a config that sets `static.auto_provision.server.url`
    directly. From then on the phone consults your URL via the _preconfigured
