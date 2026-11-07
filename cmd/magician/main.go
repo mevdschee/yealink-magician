@@ -1,20 +1,28 @@
-// magician walks one Yealink phone through a fresh provisioning cycle.
+// magician walks Yealink phones through a fresh provisioning cycle.
 //
-// Given the phone's IP and a .cfg file (and optionally a .rom firmware
-// file), it:
-//   1. Starts an HTTP server on the local IP that will serve the cfg
-//      (and firmware, if given) to exactly that phone.
-//   2. Joins the PnP multicast group and waits for the phone's boot-time
-//      SUBSCRIBE. Subscribes from any other source IP are ignored.
-//   3. Replies with a NOTIFY pointing the phone at our cfg URL; the phone
-//      fetches it, applies it, fetches the firmware if static.firmware.url
-//      is set, reflashes, and reboots.
+// Given a .cfg file (and optionally a .rom firmware file), it:
+//  1. Starts an HTTP server on the local IP that serves the cfg (and
+//     firmware, if given).
+//  2. Joins the PnP multicast group and waits for a phone's boot-time
+//     SUBSCRIBE.
+//  3. For each SUBSCRIBE it prompts the operator, then replies with a
+//     NOTIFY pointing the phone at our cfg URL; the phone fetches it,
+//     applies it, fetches the firmware if static.firmware.url is set,
+//     reflashes, and reboots.
+//
+// If -ip is given it also acts as a filter: SUBSCRIBEs and HTTP fetches
+// from any other address are ignored. Without -ip the magician answers
+// any phone on the segment (still gated by the per-SUBSCRIBE prompt).
+//
+// The magician keeps running until interrupted (Ctrl-C) or the timeout
+// elapses, so it can provision several phones in one session.
 //
 // The operator is expected to factory-reset the phone (hold OK ~10s) after
 // starting the magician — we don't have credentials to trigger it remotely.
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -23,6 +31,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,25 +45,30 @@ const (
 )
 
 func main() {
-	ipFlag := flag.String("ip", "", "phone IP address (required)")
+	ipFlag := flag.String("ip", "", "phone IP address to filter on (optional; default: answer any phone)")
 	cfgFile := flag.String("cfg", "", "path to .cfg file to push (required)")
 	fwFile := flag.String("firmware", "", "path to .rom firmware to push (optional)")
 	ifaceName := flag.String("interface", "", "network interface (default: system default)")
 	httpPort := flag.Int("http-port", 25565, "HTTP port for cfg/firmware server (0 = ephemeral)")
-	timeout := flag.Duration("timeout", 10*time.Minute, "how long to wait for the phone")
+	timeout := flag.Duration("timeout", 10*time.Minute, "how long to keep running")
+	yes := flag.Bool("yes", false, "answer every SUBSCRIBE without prompting")
 	flag.Parse()
 
-	if *ipFlag == "" || *cfgFile == "" {
-		fmt.Fprintln(os.Stderr, "error: -ip and -cfg are required")
+	if *cfgFile == "" {
+		fmt.Fprintln(os.Stderr, "error: -cfg is required")
 		flag.Usage()
 		os.Exit(2)
 	}
 
-	target := net.ParseIP(*ipFlag)
-	if target == nil || target.To4() == nil {
-		log.Fatalf("invalid IPv4 address: %s", *ipFlag)
+	// target is the optional IP filter. nil means "answer any phone".
+	var target net.IP
+	if *ipFlag != "" {
+		target = net.ParseIP(*ipFlag)
+		if target == nil || target.To4() == nil {
+			log.Fatalf("invalid IPv4 address: %s", *ipFlag)
+		}
+		target = target.To4()
 	}
-	target = target.To4()
 
 	cfgData, err := os.ReadFile(*cfgFile)
 	if err != nil {
@@ -74,7 +89,8 @@ func main() {
 		ifi     *net.Interface
 		localIP net.IP
 	)
-	if *ifaceName != "" {
+	switch {
+	case *ifaceName != "":
 		ifi, err = net.InterfaceByName(*ifaceName)
 		if err != nil {
 			log.Fatalf("interface %s: %v", *ifaceName, err)
@@ -83,10 +99,17 @@ func main() {
 		if err != nil {
 			log.Fatalf("local ip on %s: %v", *ifaceName, err)
 		}
-	} else {
+	case target != nil:
 		ifi, localIP, err = pnp.LocalForPeer(target)
 		if err != nil {
 			log.Fatalf("route to phone: %v", err)
+		}
+	default:
+		// No interface and no target to route toward: fall back to the
+		// first usable IPv4 the system offers.
+		localIP, err = pnp.InterfaceIPv4(nil)
+		if err != nil {
+			log.Fatalf("local ip: %v", err)
 		}
 	}
 
@@ -103,13 +126,14 @@ func main() {
 		cfgData = append(cfgData, []byte(fmt.Sprintf("\n# yealink-magician\nstatic.firmware.url = %s\n", fwURL))...)
 	}
 
-	cfgFetched := make(chan struct{}, 1)
-	fwFetched := make(chan struct{}, 1)
-
+	// allowPeer gates HTTP fetches by the optional IP filter.
 	allowPeer := func(r *http.Request) bool {
+		if target == nil {
+			return true
+		}
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
 		peer := net.ParseIP(host)
-		return peer != nil && peer.To4().Equal(target)
+		return peer != nil && peer.To4() != nil && peer.To4().Equal(target)
 	}
 
 	mux := http.NewServeMux()
@@ -123,10 +147,6 @@ func main() {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(cfgData)))
 		_, _ = w.Write(cfgData)
-		select {
-		case cfgFetched <- struct{}{}:
-		default:
-		}
 	})
 	if *fwFile != "" {
 		mux.HandleFunc(fwPath, func(w http.ResponseWriter, r *http.Request) {
@@ -137,10 +157,6 @@ func main() {
 			}
 			log.Printf("HTTP: %s %s from %s (range=%q, ua=%q)", r.Method, r.URL.Path, r.RemoteAddr, r.Header.Get("Range"), r.UserAgent())
 			http.ServeFile(w, r, *fwFile)
-			select {
-			case fwFetched <- struct{}{}:
-			default:
-			}
 		})
 	}
 	server := &http.Server{Handler: mux}
@@ -167,19 +183,43 @@ func main() {
 		}
 	}()
 
-	notified := make(chan struct{}, 1)
+	// prompter serializes the per-SUBSCRIBE operator prompt so concurrent
+	// SUBSCRIBEs don't interleave their questions on the terminal.
+	var promptMu sync.Mutex
+	stdin := bufio.NewReader(os.Stdin)
+	confirm := func(s pnp.Subscribe) bool {
+		if *yes {
+			return true
+		}
+		promptMu.Lock()
+		defer promptMu.Unlock()
+		fmt.Printf("    send provisioning URL to %s (%s)? [y/N] ", s.Source, s.UserAgent)
+		line, err := stdin.ReadString('\n')
+		if err != nil {
+			// EOF / no TTY: treat as "no" unless -yes was passed.
+			return false
+		}
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "y", "yes":
+			return true
+		default:
+			return false
+		}
+	}
+
 	r := &pnp.Responder{
 		Interface: ifi,
 		Handler: func(s pnp.Subscribe) (string, bool) {
-			if !s.Source.IP.To4().Equal(target) {
+			if target != nil && (s.Source.IP.To4() == nil || !s.Source.IP.To4().Equal(target)) {
 				log.Printf("PnP: ignoring SUBSCRIBE from %s (want %s)", s.Source.IP, target)
 				return "", false
 			}
-			log.Printf("PnP: SUBSCRIBE from %s (%s) — sending URL", s.Source, s.UserAgent)
-			select {
-			case notified <- struct{}{}:
-			default:
+			log.Printf("PnP: SUBSCRIBE from %s (%s)", s.Source, s.UserAgent)
+			if !confirm(s) {
+				log.Printf("PnP: skipped %s", s.Source)
+				return "", false
 			}
+			log.Printf("PnP: sending URL to %s -> %s", s.Source, cfgURL)
 			return cfgURL, true
 		},
 		Logger: log.Default(),
@@ -195,42 +235,23 @@ func main() {
 		log.Printf("HTTP serving firmware %q at %s", *fwFile, fwURL)
 	}
 	log.Printf("PnP listening on %s (interface=%s)", pnp.Group, ifaceLabel(ifi))
+	if target != nil {
+		log.Printf("IP filter: answering only %s", target)
+	} else {
+		log.Printf("IP filter: off (answering any phone on the segment)")
+	}
 	log.Printf("")
-	log.Printf("==> Now factory-reset the phone at %s.", target)
+	if target != nil {
+		log.Printf("==> Now factory-reset the phone at %s.", target)
+	} else {
+		log.Printf("==> Now factory-reset the phone you want to provision.")
+	}
 	log.Printf("    Press and hold the OK key for ~10s, then confirm the reset prompt.")
 	log.Printf("")
-	log.Printf("Waiting up to %s for the phone's PnP multicast...", *timeout)
+	log.Printf("Running until Ctrl-C or %s elapses; you'll be prompted on each SUBSCRIBE.", *timeout)
 
-	select {
-	case <-notified:
-	case <-ctx.Done():
-		log.Fatalf("timed out waiting for PnP from %s", target)
-	}
-
-	log.Printf("waiting for phone to fetch cfg...")
-	select {
-	case <-cfgFetched:
-		log.Printf("phone fetched cfg")
-	case <-ctx.Done():
-		log.Fatalf("timed out waiting for phone to fetch cfg from %s", target)
-	}
-
-	if *fwFile == "" {
-		log.Printf("done — phone will apply config and reboot")
-		return
-	}
-
-	log.Printf("waiting for phone to fetch firmware...")
-	select {
-	case <-fwFetched:
-	case <-ctx.Done():
-		log.Fatalf("timed out waiting for phone to fetch firmware from %s", target)
-	}
-	log.Printf("phone is fetching firmware; staying up 30s for any straggling range requests")
-	graceCtx, graceCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer graceCancel()
-	<-graceCtx.Done()
-	log.Printf("done — phone will reflash and reboot")
+	<-ctx.Done()
+	log.Printf("shutting down")
 }
 
 func ifaceLabel(ifi *net.Interface) string {
